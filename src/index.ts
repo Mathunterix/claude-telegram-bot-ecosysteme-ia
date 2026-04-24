@@ -43,6 +43,7 @@ import {
   handleVoiceCmd,
   handleVoicesCmd,
   handleModelCmd,
+  handleTasksCmd,
 } from "./handlers/commands";
 import { setBotRef } from "./botRef";
 import { loadSessionRegistry, sessionRegistry } from "./session";
@@ -184,6 +185,7 @@ bot.command("forbid", handleForbid);
 bot.command("voice", handleVoiceCmd);
 bot.command("voices", handleVoicesCmd);
 bot.command("model", handleModelCmd);
+bot.command("tasks", handleTasksCmd);
 
 // ============== Message Handlers ==============
 
@@ -283,6 +285,7 @@ try {
       command: "model",
       description: "Switch de modele (haiku / sonnet / opus)",
     },
+    { command: "tasks", description: "Liste les taches en arriere-plan" },
     { command: "help", description: "Aide et commandes disponibles" },
   ]);
   console.log("setMyCommands: menu slash enregistre");

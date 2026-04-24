@@ -18,6 +18,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname } from "path";
+import { startBackgroundTask, runningCount } from "./backgroundTasks";
 
 // ========================================================================
 // DANGEROUS_PATTERNS — regex sur le `command` du tool Bash
@@ -284,6 +285,56 @@ export function createCanUseTool(
     _options: { signal: AbortSignal; toolUseID: string },
   ) {
     const perms = getSessionPerms(sessionKey);
+
+    // S12: intercept Task with run_in_background:true and spawn it as a
+    // background promise instead of blocking the main session. The main
+    // agent gets a "started, will notify" deny response so it can keep
+    // talking to the user.
+    if (
+      toolName === "Task" &&
+      (input.run_in_background === true || input.runInBackground === true)
+    ) {
+      const [chatStr, threadStr] = sessionKey.split(":");
+      const chatId = parseInt(chatStr ?? "", 10);
+      const threadId = parseInt(threadStr ?? "0", 10);
+      if (!chatId || isNaN(chatId)) {
+        // Fallback: can't run in background without a chatId, let the SDK run it foreground.
+        return { behavior: "allow" as const, updatedInput: input };
+      }
+      if (runningCount() >= 3) {
+        return {
+          behavior: "deny" as const,
+          message:
+            "Trop de taches en arriere-plan (3 max). Attends qu'une se termine ou utilise /tasks pour voir l'etat.",
+        };
+      }
+      const description =
+        typeof input.description === "string"
+          ? input.description
+          : "(sans description)";
+      const subagentType =
+        typeof input.subagent_type === "string"
+          ? input.subagent_type
+          : undefined;
+      const taskId = startBackgroundTask({
+        sessionKey,
+        chatId,
+        threadId: threadId > 0 ? threadId : undefined,
+        description,
+        subagentType,
+      });
+      if (!taskId) {
+        return {
+          behavior: "deny" as const,
+          message:
+            "Impossible de lancer la tache en arriere-plan (limite atteinte). Reessaie sans run_in_background ou attends.",
+        };
+      }
+      return {
+        behavior: "deny" as const,
+        message: `Tache lancee en arriere-plan avec l'id ${taskId}. Je continuerai la conversation en attendant sa fin. Dis a l'utilisateur que tu restes disponible pendant qu'elle tourne. Ne reessaie pas d'invoquer Task pour cette demande.`,
+      };
+    }
 
     // 1. /forbid <tool> : refus immediat sans demander
     if (perms && perms.forbidTools.has(toolName)) {

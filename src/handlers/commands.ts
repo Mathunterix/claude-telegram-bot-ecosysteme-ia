@@ -8,6 +8,12 @@ import type { Context } from "grammy";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { getSession, saveSessionRegistry, listSessions } from "../session";
 import { WORKING_DIR, ALLOWED_USERS, RESTART_FILE } from "../config";
+import {
+  listTasks,
+  abortTask,
+  getTask,
+  type BackgroundTask,
+} from "../backgroundTasks";
 import { isAuthorized } from "../security";
 import type { ApprovalChoice } from "../permissions";
 
@@ -351,6 +357,11 @@ export async function handleHelp(ctx: Context): Promise<void> {
       `/model - Afficher le modele courant\n` +
       `/model haiku|sonnet|opus - Switch modele\n` +
       `/model default - Revenir au defaut\n\n` +
+      `<b>Taches en arriere-plan</b>\n` +
+      `/tasks - Liste des taches du topic courant\n` +
+      `/tasks all - Liste tous topics\n` +
+      `/tasks &lt;id&gt; - Details d'une tache\n` +
+      `/tasks kill &lt;id&gt; - Annuler une tache\n\n` +
       `<b>Astuces</b>\n` +
       `- Prefixer avec <code>!</code> interrompt la requete en cours\n` +
       `- Mots-cles <code>think</code>, <code>reflechis</code> activent le raisonnement etendu\n` +
@@ -839,6 +850,99 @@ export async function handleModelCmd(ctx: Context): Promise<void> {
     `Modele du topic : <code>${resolved}</code>. Applique au prochain message.`,
     { parse_mode: "HTML" },
   );
+}
+
+// ====================================================================
+// S12 — Background tasks commands
+// ====================================================================
+
+/**
+ * /tasks - liste les taches en arriere-plan pour ce topic (+ optionnellement autres).
+ * /tasks <id> - affiche les details + resultat d'une tache specifique.
+ * /tasks kill <id> - annule une tache en cours.
+ */
+export async function handleTasksCmd(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const args = (ctx.message?.text ?? "").trim().split(/\s+/).slice(1);
+
+  if (args[0] === "kill" && args[1]) {
+    const ok = abortTask(args[1]);
+    await ctx.reply(
+      ok
+        ? `Tache <code>${args[1]}</code> annulee.`
+        : `Tache <code>${args[1]}</code> introuvable ou deja terminee.`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  if (args[0] && args[0] !== "all") {
+    const t = getTask(args[0]);
+    if (!t) {
+      await ctx.reply(`Tache <code>${args[0]}</code> introuvable.`, {
+        parse_mode: "HTML",
+      });
+      return;
+    }
+    const duration = Math.round(
+      ((t.endedAt ?? Date.now()) - t.startedAt) / 1000,
+    );
+    const body =
+      `<b>Tache</b> <code>${t.id}</code>\n` +
+      `etat : ${t.state}\n` +
+      `topic : <code>${t.sessionKey}</code>\n` +
+      `duree : ${duration}s\n` +
+      `subagent : ${t.subagentType ?? "-"}\n` +
+      `description : ${t.description.slice(0, 300)}`;
+    await ctx.reply(body, { parse_mode: "HTML" });
+    return;
+  }
+
+  const showAll = args[0] === "all";
+  const list = showAll ? listTasks() : listTasks(session.sessionKey);
+
+  if (list.length === 0) {
+    await ctx.reply(
+      showAll
+        ? "Aucune tache en arriere-plan."
+        : "Aucune tache en arriere-plan pour ce topic. Utilise <code>/tasks all</code> pour voir les autres topics.",
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  const lines: string[] = [
+    `<b>Taches en arriere-plan (${list.length}${showAll ? " tous topics" : " ce topic"})</b>\n`,
+  ];
+  for (const t of list
+    .sort((a: BackgroundTask, b: BackgroundTask) => b.startedAt - a.startedAt)
+    .slice(0, 15)) {
+    const icon =
+      t.state === "running"
+        ? "⏳"
+        : t.state === "completed"
+          ? "✓"
+          : t.state === "timeout"
+            ? "⏱️"
+            : "⚠️";
+    const duration = Math.round(
+      ((t.endedAt ?? Date.now()) - t.startedAt) / 1000,
+    );
+    const suffix = t.subagentType ? ` [${t.subagentType}]` : "";
+    lines.push(
+      `${icon} <code>${t.id}</code>${suffix} · ${duration}s · ${t.description.slice(0, 60)}`,
+    );
+  }
+  lines.push(
+    "",
+    "<i>/tasks &lt;id&gt; pour details · /tasks kill &lt;id&gt; pour annuler</i>",
+  );
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
 }
 
 // Suppress unused-import warning for existsSync in some TS setups (helper for future use).
