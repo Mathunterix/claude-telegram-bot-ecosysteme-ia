@@ -59,7 +59,7 @@ export async function auditLog(
   username: string,
   messageType: string,
   content: string,
-  response = ""
+  response = "",
 ): Promise<void> {
   const event: AuditEvent = {
     timestamp: new Date().toISOString(),
@@ -78,7 +78,7 @@ export async function auditLog(
 export async function auditLogAuth(
   userId: number,
   username: string,
-  authorized: boolean
+  authorized: boolean,
 ): Promise<void> {
   await writeAuditLog({
     timestamp: new Date().toISOString(),
@@ -95,7 +95,7 @@ export async function auditLogTool(
   toolName: string,
   toolInput: Record<string, unknown>,
   blocked = false,
-  reason = ""
+  reason = "",
 ): Promise<void> {
   const event: AuditEvent = {
     timestamp: new Date().toISOString(),
@@ -116,7 +116,7 @@ export async function auditLogError(
   userId: number,
   username: string,
   error: string,
-  context = ""
+  context = "",
 ): Promise<void> {
   const event: AuditEvent = {
     timestamp: new Date().toISOString(),
@@ -134,7 +134,7 @@ export async function auditLogError(
 export async function auditLogRateLimit(
   userId: number,
   username: string,
-  retryAfter: number
+  retryAfter: number,
 ): Promise<void> {
   await writeAuditLog({
     timestamp: new Date().toISOString(),
@@ -147,9 +147,39 @@ export async function auditLogRateLimit(
 
 // ============== Voice Transcription ==============
 
+/**
+ * Transcribe voice. Si STT_PROVIDER=local, delegue au wrapper Python
+ * _stt_transcribe.py (faster-whisper, MIT, gratuit). Sinon fallback OpenAI.
+ * QW2 ecosysteme-ia.
+ */
 export async function transcribeVoice(
-  filePath: string
+  filePath: string,
 ): Promise<string | null> {
+  const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+
+  if (provider === "local") {
+    const script =
+      process.env.ECOSYS_STT_SCRIPT ||
+      "/app/vault/.claude/scripts/_stt_transcribe.py";
+    try {
+      const proc = Bun.spawn(["python3", script, filePath], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const exitCode = await proc.exited;
+      const out = await new Response(proc.stdout).text();
+      const err = await new Response(proc.stderr).text();
+      if (exitCode === 0 && out.trim()) {
+        return out.trim();
+      }
+      console.warn(`Local STT failed (exit=${exitCode}): ${err.slice(0, 500)}`);
+      return null;
+    } catch (error) {
+      console.error("Local STT spawn failed:", error);
+      return null;
+    }
+  }
+
   if (!openaiClient) {
     console.warn("OpenAI client not available for transcription");
     return null;

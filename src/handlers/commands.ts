@@ -5,9 +5,11 @@
  */
 
 import type { Context } from "grammy";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { session } from "../session";
 import { WORKING_DIR, ALLOWED_USERS, RESTART_FILE } from "../config";
 import { isAuthorized } from "../security";
+import type { ApprovalChoice } from "../permissions";
 
 /**
  * /start - Show welcome message and status.
@@ -39,7 +41,7 @@ export async function handleStart(ctx: Context): Promise<void> {
       `• Prefix with <code>!</code> to interrupt current query\n` +
       `• Use "think" keyword for extended reasoning\n` +
       `• Send photos, voice, or documents`,
-    { parse_mode: "HTML" }
+    { parse_mode: "HTML" },
   );
 }
 
@@ -131,7 +133,7 @@ export async function handleStatus(ctx: Context): Promise<void> {
   // Last activity
   if (session.lastActivity) {
     const ago = Math.floor(
-      (Date.now() - session.lastActivity.getTime()) / 1000
+      (Date.now() - session.lastActivity.getTime()) / 1000,
     );
     lines.push(`\n⏱️ Last activity: ${ago}s ago`);
   }
@@ -142,11 +144,11 @@ export async function handleStatus(ctx: Context): Promise<void> {
     lines.push(
       `\n📈 Last query usage:`,
       `   Input: ${usage.input_tokens?.toLocaleString() || "?"} tokens`,
-      `   Output: ${usage.output_tokens?.toLocaleString() || "?"} tokens`
+      `   Output: ${usage.output_tokens?.toLocaleString() || "?"} tokens`,
     );
     if (usage.cache_read_input_tokens) {
       lines.push(
-        `   Cache read: ${usage.cache_read_input_tokens.toLocaleString()}`
+        `   Cache read: ${usage.cache_read_input_tokens.toLocaleString()}`,
       );
     }
   }
@@ -214,12 +216,15 @@ export async function handleResume(ctx: Context): Promise<void> {
     ];
   });
 
-  await ctx.reply("📋 <b>Sessioni salvate</b>\n\nSeleziona una sessione da riprendere:", {
-    parse_mode: "HTML",
-    reply_markup: {
-      inline_keyboard: buttons,
+  await ctx.reply(
+    "📋 <b>Sessioni salvate</b>\n\nSeleziona una sessione da riprendere:",
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: buttons,
+      },
     },
-  });
+  );
 }
 
 /**
@@ -245,7 +250,7 @@ export async function handleRestart(ctx: Context): Promise<void> {
           chat_id: chatId,
           message_id: msg.message_id,
           timestamp: Date.now(),
-        })
+        }),
       );
     } catch (e) {
       console.warn("Failed to save restart info:", e);
@@ -283,7 +288,9 @@ export async function handleRetry(ctx: Context): Promise<void> {
   }
 
   const message = session.lastMessage;
-  await ctx.reply(`🔄 Retrying: "${message.slice(0, 50)}${message.length > 50 ? "..." : ""}"`);
+  await ctx.reply(
+    `🔄 Retrying: "${message.slice(0, 50)}${message.length > 50 ? "..." : ""}"`,
+  );
 
   // Simulate sending the message again by emitting a fake text message event
   // We do this by directly calling the text handler logic
@@ -300,3 +307,125 @@ export async function handleRetry(ctx: Context): Promise<void> {
 
   await handleText(fakeCtx);
 }
+
+/**
+ * /help — Afficher toutes les commandes disponibles en francais.
+ */
+export async function handleHelp(ctx: Context): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise. Contacte le proprietaire du bot.");
+    return;
+  }
+
+  await ctx.reply(
+    `<b>Commandes disponibles</b>\n\n` +
+      `/new - Nouvelle session (reset memoire + history)\n` +
+      `/stop - Stopper la requete en cours\n` +
+      `/status - Etat de la session\n` +
+      `/resume - Reprendre la derniere session\n` +
+      `/retry - Relancer le dernier message\n` +
+      `/restart - Redemarrer le bot\n` +
+      `/approve - Approuver la derniere demande de permission\n` +
+      `/deny - Refuser la derniere demande de permission\n\n` +
+      `<b>Astuces</b>\n` +
+      `- Prefixer avec <code>!</code> interrompt la requete en cours\n` +
+      `- Mots-cles <code>think</code>, <code>reflechis</code> activent le raisonnement etendu\n` +
+      `- Envoyer photos, vocaux ou documents fonctionne directement\n` +
+      `- Les commandes dangereuses declenchent un popup d'approbation`,
+    { parse_mode: "HTML" },
+  );
+}
+
+/**
+ * Resoudre la plus recente demande d'approbation pending pour ce chat.
+ * Fallback texte pour /approve et /deny si les boutons inline ne sont pas cliquables.
+ */
+async function resolveLatestApproval(
+  ctx: Context,
+  choice: ApprovalChoice,
+): Promise<void> {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return;
+
+  const tmpDir = process.env.ECOSYS_APPROVAL_TMP_DIR || "/tmp";
+  const glob = new Bun.Glob("approval-*.json");
+
+  let latestRequestId: string | null = null;
+  let latestCreatedAt = 0;
+
+  for await (const filename of glob.scan({ cwd: tmpDir, absolute: false })) {
+    if (filename.includes(".response.")) continue;
+    const filepath = `${tmpDir}/${filename}`;
+    try {
+      const raw = readFileSync(filepath, "utf-8");
+      const data = JSON.parse(raw) as {
+        request_id: string;
+        chat_id: number;
+        status: string;
+        created_at: number;
+      };
+      if (data.chat_id !== chatId) continue;
+      if (data.status === "answered") continue;
+      if (data.created_at > latestCreatedAt) {
+        latestCreatedAt = data.created_at;
+        latestRequestId = data.request_id;
+      }
+    } catch {
+      // ignore unreadable files
+    }
+  }
+
+  if (!latestRequestId) {
+    await ctx.reply("Aucune demande d'approbation en attente.");
+    return;
+  }
+
+  const responsePath = `${tmpDir}/approval-${latestRequestId}.response.json`;
+  writeFileSync(
+    responsePath,
+    JSON.stringify({ request_id: latestRequestId, choice }),
+  );
+
+  const labels: Record<ApprovalChoice, string> = {
+    once: "autorise une fois",
+    session: "autorise pour cette session",
+    always: "autorise toujours",
+    deny: "refuse",
+    timeout: "expire",
+  };
+  await ctx.reply(`Demande ${labels[choice]}.`);
+}
+
+/**
+ * /approve - Approuver la derniere demande pending (fallback texte).
+ * Accepte un argument optionnel : once (defaut) / session / always.
+ */
+export async function handleApprove(ctx: Context): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+
+  const arg = ctx.message?.text?.split(/\s+/)[1]?.toLowerCase() ?? "once";
+  const choice: ApprovalChoice = (
+    arg === "session" || arg === "always" ? arg : "once"
+  ) as ApprovalChoice;
+  await resolveLatestApproval(ctx, choice);
+}
+
+/**
+ * /deny - Refuser la derniere demande pending (fallback texte).
+ */
+export async function handleDeny(ctx: Context): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  await resolveLatestApproval(ctx, "deny");
+}
+
+// Suppress unused-import warning for existsSync in some TS setups (helper for future use).
+void existsSync;

@@ -11,6 +11,8 @@ import { ALLOWED_USERS } from "../config";
 import { isAuthorized } from "../security";
 import { auditLog, startTypingIndicator } from "../utils";
 import { StreamingState, createStatusCallback } from "./streaming";
+import { writeApprovalResponse } from "./approval";
+import type { ApprovalChoice } from "../permissions";
 
 /**
  * Handle callback queries from inline keyboards.
@@ -35,6 +37,12 @@ export async function handleCallback(ctx: Context): Promise<void> {
   // 2. Handle resume callbacks: resume:{session_id}
   if (callbackData.startsWith("resume:")) {
     await handleResumeCallback(ctx, callbackData);
+    return;
+  }
+
+  // 2.5. Handle approval callbacks: approval:{request_id}:{choice}
+  if (callbackData.startsWith("approval:")) {
+    await handleApprovalCallback(ctx, callbackData);
     return;
   }
 
@@ -123,7 +131,7 @@ export async function handleCallback(ctx: Context): Promise<void> {
       userId,
       statusCallback,
       chatId,
-      ctx
+      ctx,
     );
 
     await auditLog(userId, username, "CALLBACK", message, response);
@@ -153,11 +161,52 @@ export async function handleCallback(ctx: Context): Promise<void> {
 }
 
 /**
+ * Handle approval callback (approval:{request_id}:{choice}).
+ * Ecrit le fichier de reponse que requestApproval() polle.
+ */
+async function handleApprovalCallback(
+  ctx: Context,
+  callbackData: string,
+): Promise<void> {
+  const parts = callbackData.split(":");
+  if (parts.length !== 3) {
+    await ctx.answerCallbackQuery({ text: "Donnees callback invalides" });
+    return;
+  }
+  const requestId = parts[1]!;
+  const rawChoice = parts[2]!;
+  const validChoices: ApprovalChoice[] = ["once", "session", "always", "deny"];
+  if (!validChoices.includes(rawChoice as ApprovalChoice)) {
+    await ctx.answerCallbackQuery({ text: "Choix invalide" });
+    return;
+  }
+  const choice = rawChoice as ApprovalChoice;
+
+  writeApprovalResponse(requestId, choice);
+
+  const labels: Record<ApprovalChoice, string> = {
+    once: "Autorise une fois",
+    session: "Autorise pour cette session",
+    always: "Autorise toujours",
+    deny: "Refuse",
+    timeout: "Expire",
+  };
+
+  try {
+    await ctx.editMessageText(`✓ ${labels[choice]}`);
+  } catch (error) {
+    console.debug("Failed to edit approval message:", error);
+  }
+
+  await ctx.answerCallbackQuery({ text: labels[choice] });
+}
+
+/**
  * Handle resume session callback (resume:{session_id}).
  */
 async function handleResumeCallback(
   ctx: Context,
-  callbackData: string
+  callbackData: string,
 ): Promise<void> {
   const userId = ctx.from?.id;
   const username = ctx.from?.username || "unknown";
@@ -206,7 +255,7 @@ async function handleResumeCallback(
       userId,
       statusCallback,
       chatId,
-      ctx
+      ctx,
     );
   } catch (error) {
     console.error("Error getting recap:", error);

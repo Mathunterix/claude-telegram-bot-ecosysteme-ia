@@ -6,7 +6,12 @@
 
 import { Bot } from "grammy";
 import { run, sequentialize } from "@grammyjs/runner";
-import { TELEGRAM_TOKEN, WORKING_DIR, ALLOWED_USERS, RESTART_FILE } from "./config";
+import {
+  TELEGRAM_TOKEN,
+  WORKING_DIR,
+  ALLOWED_USERS,
+  RESTART_FILE,
+} from "./config";
 import { unlinkSync, readFileSync, existsSync } from "fs";
 import {
   handleStart,
@@ -24,9 +29,15 @@ import {
   handleVideo,
   handleCallback,
 } from "./handlers";
+import { handleApprove, handleDeny, handleHelp } from "./handlers/commands";
+import { setBotRef } from "./botRef";
 
 // Create bot instance
 const bot = new Bot(TELEGRAM_TOKEN);
+
+// Expose bot reference for modules that need to send messages outside a Context
+// (e.g. approval.ts triggered from canUseTool callback).
+setBotRef(bot);
 
 // Sequentialize non-command messages per user (prevents race conditions)
 // Commands bypass sequentialization so they work immediately
@@ -46,7 +57,7 @@ bot.use(
     }
     // Other messages are sequentialized per chat
     return ctx.chat?.id.toString();
-  })
+  }),
 );
 
 // ============== Command Handlers ==============
@@ -58,6 +69,9 @@ bot.command("status", handleStatus);
 bot.command("resume", handleResume);
 bot.command("restart", handleRestart);
 bot.command("retry", handleRetry);
+bot.command("help", handleHelp);
+bot.command("approve", handleApprove);
+bot.command("deny", handleDeny);
 
 // ============== Message Handlers ==============
 
@@ -103,6 +117,31 @@ console.log("Starting bot...");
 const botInfo = await bot.api.getMe();
 console.log(`Bot started: @${botInfo.username}`);
 
+// Register slash menu natively with Telegram (QW1).
+// Users get autocomplete when typing / in the chat.
+try {
+  await bot.api.setMyCommands([
+    {
+      command: "new",
+      description: "Nouvelle session (reset memoire + history)",
+    },
+    { command: "stop", description: "Stopper la requete en cours" },
+    { command: "status", description: "Etat de la session actuelle" },
+    { command: "resume", description: "Reprendre la derniere session" },
+    { command: "retry", description: "Relancer le dernier message" },
+    { command: "restart", description: "Redemarrer le bot" },
+    {
+      command: "approve",
+      description: "Approuver la derniere demande (une fois)",
+    },
+    { command: "deny", description: "Refuser la derniere demande" },
+    { command: "help", description: "Aide et commandes disponibles" },
+  ]);
+  console.log("setMyCommands: menu slash enregistre");
+} catch (e) {
+  console.warn("setMyCommands failed:", e);
+}
+
 // Check for pending restart message to update
 if (existsSync(RESTART_FILE)) {
   try {
@@ -114,13 +153,15 @@ if (existsSync(RESTART_FILE)) {
       await bot.api.editMessageText(
         data.chat_id,
         data.message_id,
-        "✅ Bot restarted"
+        "✅ Bot restarted",
       );
     }
     unlinkSync(RESTART_FILE);
   } catch (e) {
     console.warn("Failed to update restart message:", e);
-    try { unlinkSync(RESTART_FILE); } catch {}
+    try {
+      unlinkSync(RESTART_FILE);
+    } catch {}
   }
 }
 
