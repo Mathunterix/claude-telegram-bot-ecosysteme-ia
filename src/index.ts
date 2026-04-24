@@ -13,7 +13,7 @@ import {
   ALLOWED_USERS,
   RESTART_FILE,
 } from "./config";
-import { unlinkSync, readFileSync, existsSync } from "fs";
+import { unlinkSync, readFileSync, writeFileSync, existsSync } from "fs";
 import {
   handleStart,
   handleNew,
@@ -46,6 +46,38 @@ import {
 } from "./handlers/commands";
 import { setBotRef } from "./botRef";
 import { loadSessionRegistry, sessionRegistry } from "./session";
+import {
+  PERMISSION_REPLY_RE,
+  resolveApprovalByShortCode,
+} from "./handlers/approval";
+import type { ApprovalChoice } from "./permissions";
+// S11 Pattern 5: bot.pid orphan killer (ported from claude-plugins-official/telegram).
+// Telegram Bot API allows exactly one getUpdates consumer per token. If the
+// previous process crashed (OOM, SIGKILL, Coolify forced stop), its poller
+// can survive as a zombie and keep holding the slot, so every new start hits
+// 409 Conflict. We kill any stale holder before we start polling.
+const BOT_PID_FILE = process.env.ECOSYS_BOT_PID_FILE || "/tmp/ecosys-bot.pid";
+try {
+  if (existsSync(BOT_PID_FILE)) {
+    const stale = parseInt(readFileSync(BOT_PID_FILE, "utf-8"), 10);
+    if (stale > 1 && stale !== process.pid) {
+      try {
+        process.kill(stale, 0); // check if alive (no signal sent)
+        console.warn(`[boot] replacing stale poller pid=${stale}`);
+        process.kill(stale, "SIGTERM");
+      } catch {
+        // already dead or no perm, nothing to do
+      }
+    }
+  }
+} catch (error) {
+  console.warn("[boot] stale check failed:", error);
+}
+try {
+  writeFileSync(BOT_PID_FILE, String(process.pid));
+} catch (error) {
+  console.warn("[boot] failed to write pid file:", error);
+}
 
 // Create bot instance
 const bot = new Bot(TELEGRAM_TOKEN);
@@ -64,6 +96,51 @@ bot.api.config.use(
 // Expose bot reference for modules that need to send messages outside a Context
 // (e.g. approval.ts triggered from canUseTool callback).
 setBotRef(bot);
+
+// S11 Pattern 4: ackReaction (emoji 👀 acknowledging receipt) ported from
+// claude-plugins-official/telegram. Gives the user immediate visual feedback
+// that the bot saw the message, even before processing starts. Telegram
+// silently drops emojis not on its whitelist, so we default to a safe one.
+// Disable with ECOSYS_ACK_REACTION="" (empty).
+const ACK_REACTION = process.env.ECOSYS_ACK_REACTION ?? "👀";
+if (ACK_REACTION) {
+  bot.use(async (ctx, next) => {
+    if (ctx.message?.message_id) {
+      try {
+        await ctx.react(ACK_REACTION as Parameters<typeof ctx.react>[0]);
+      } catch {
+        // silent fail (non-whitelisted emoji, no permission, etc.)
+      }
+    }
+    await next();
+  });
+}
+
+// S11 Pattern 2: intercept text-based permission replies `y abcde` / `n abcde`
+// BEFORE the sequentializer. Matches the short_code of a pending approval and
+// resolves it without sending the message to Claude. Mobile-friendly fallback
+// when inline buttons are inconvenient (ported from official plugin).
+bot.on("message:text", async (ctx, next) => {
+  const text = ctx.message?.text ?? "";
+  const match = text.match(PERMISSION_REPLY_RE);
+  if (!match) return next();
+  const chatId = ctx.chat?.id;
+  if (!chatId) return next();
+  const verb = match[1]!.toLowerCase();
+  const code = match[2]!.toLowerCase();
+  const choice: ApprovalChoice =
+    verb === "y" || verb === "yes" ? "once" : "deny";
+  const resolved = resolveApprovalByShortCode(chatId, code, choice);
+  if (resolved) {
+    const label = choice === "once" ? "approuvee" : "refusee";
+    await ctx.reply(`Permission ${label} via code <code>${code}</code>.`, {
+      parse_mode: "HTML",
+    });
+    return; // short-circuit: do not forward to Claude
+  }
+  // No matching pending approval — fall through as a normal text message.
+  return next();
+});
 
 // Sequentialize non-command messages per user (prevents race conditions)
 // Commands bypass sequentialization so they work immediately
@@ -309,6 +386,15 @@ const stopRunner = () => {
   if (runner.isRunning()) {
     console.log("Stopping bot...");
     runner.stop();
+  }
+  // Clean up pid file if it's ours (ignore if someone else took over)
+  try {
+    if (existsSync(BOT_PID_FILE)) {
+      const owner = parseInt(readFileSync(BOT_PID_FILE, "utf-8"), 10);
+      if (owner === process.pid) unlinkSync(BOT_PID_FILE);
+    }
+  } catch {
+    // best-effort cleanup
   }
 };
 

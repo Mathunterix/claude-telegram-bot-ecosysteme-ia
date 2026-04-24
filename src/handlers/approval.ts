@@ -20,6 +20,8 @@ import type { Context } from "grammy";
 import { InlineKeyboard } from "grammy";
 import type { ApprovalChoice } from "../permissions";
 import { getBotRef } from "../botRef";
+import { readdirSync } from "fs";
+void readdirSync; // in case Bun.Glob API surface changes later
 
 const TMP_DIR = process.env.ECOSYS_APPROVAL_TMP_DIR || "/tmp";
 const APPROVAL_TIMEOUT_MS = parseInt(
@@ -36,7 +38,34 @@ type ApprovalPending = {
   reason: string;
   status: "pending" | "sent" | "answered";
   created_at: number;
+  /**
+   * S11 Pattern 2: short 5-char code (lowercase a-k, m-z) for text-based
+   * permission reply on mobile when inline buttons aren't convenient.
+   * Ported from claude-plugins-official/telegram PERMISSION_REPLY_RE.
+   * Alphabet excludes "l" (confuses with "1" / "I").
+   */
+  short_code: string;
 };
+
+const SHORT_CODE_ALPHABET = "abcdefghijkmnopqrstuvwxyz"; // no 'l'
+
+function generateShortCode(length = 5): string {
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out +=
+      SHORT_CODE_ALPHABET[
+        Math.floor(Math.random() * SHORT_CODE_ALPHABET.length)
+      ];
+  }
+  return out;
+}
+
+/**
+ * Regex matching text-based permission replies like "y abcde" / "yes abcde" /
+ * "n abcde" / "no abcde". Case-insensitive for phone autocorrect. Strict:
+ * no bare yes/no (too conversational), no prefix/suffix chatter.
+ */
+export const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
 
 type ApprovalResponse = {
   request_id: string;
@@ -78,6 +107,7 @@ export async function requestApproval(
   }
 
   const requestId = randomUUID();
+  const shortCode = generateShortCode(5);
   const payload: ApprovalPending = {
     request_id: requestId,
     chat_id: chatId,
@@ -86,6 +116,7 @@ export async function requestApproval(
     reason,
     status: "pending",
     created_at: Date.now(),
+    short_code: shortCode,
   };
 
   try {
@@ -106,7 +137,7 @@ export async function requestApproval(
       "```\n" +
       preview +
       "\n```\n\n" +
-      "Choisis :";
+      `Choisis (ou reponds \`y ${shortCode}\` / \`n ${shortCode}\`) :`;
     await bot.api.sendMessage(chatId, msg, {
       parse_mode: "Markdown",
       reply_markup: buildApprovalKeyboard(requestId),
@@ -210,4 +241,33 @@ export function writeApprovalResponse(
   } catch (error) {
     console.error("[approval] failed to write response file:", error);
   }
+}
+
+/**
+ * S11 Pattern 2: resolve an approval by its short 5-char code (text reply).
+ * Called by the text middleware in index.ts when it detects `y abcde` or `n abcde`.
+ * Returns true if a matching pending approval was found and resolved, false otherwise.
+ */
+export function resolveApprovalByShortCode(
+  chatId: number,
+  shortCode: string,
+  choice: ApprovalChoice,
+): boolean {
+  const code = shortCode.toLowerCase();
+  const glob = new Bun.Glob("approval-*.json");
+  for (const filename of glob.scanSync({ cwd: TMP_DIR, absolute: false })) {
+    if (filename.includes(".response.")) continue;
+    const filepath = `${TMP_DIR}/${filename}`;
+    try {
+      const raw = readFileSync(filepath, "utf-8");
+      const data = JSON.parse(raw) as ApprovalPending;
+      if (data.chat_id !== chatId) continue;
+      if (data.short_code !== code) continue;
+      writeApprovalResponse(data.request_id, choice);
+      return true;
+    } catch {
+      // unreadable file, skip
+    }
+  }
+  return false;
 }

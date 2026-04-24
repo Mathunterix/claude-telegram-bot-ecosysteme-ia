@@ -187,15 +187,49 @@ function formatWithinLimit(
 }
 
 /**
+ * S11 Pattern 6: chunkMode newline - split content on paragraph boundaries
+ * (\n\n) when possible, falling back to hard char slicing for paragraphs
+ * that exceed the limit on their own. Prevents cutting messages mid-sentence
+ * and makes long responses readable.
+ * Ported from claude-plugins-official/telegram (chunkMode: "newline").
+ */
+function chunkByParagraphs(content: string, limit: number): string[] {
+  if (content.length <= limit) return [content];
+  const paragraphs = content.split(/\n\n+/);
+  const chunks: string[] = [];
+  let current = "";
+  for (const p of paragraphs) {
+    const candidate = current ? current + "\n\n" + p : p;
+    if (candidate.length <= limit) {
+      current = candidate;
+      continue;
+    }
+    if (current) {
+      chunks.push(current);
+      current = "";
+    }
+    if (p.length > limit) {
+      // Oversized paragraph: fall back to hard char split.
+      for (let i = 0; i < p.length; i += limit) {
+        chunks.push(p.slice(i, i + limit));
+      }
+    } else {
+      current = p;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+/**
  * Split long formatted content into chunks and send as separate messages.
  */
 async function sendChunkedMessages(
   ctx: Context,
   content: string,
 ): Promise<void> {
-  // Split on markdown content first, then format each chunk
-  for (let i = 0; i < content.length; i += TELEGRAM_SAFE_LIMIT) {
-    const chunk = content.slice(i, i + TELEGRAM_SAFE_LIMIT);
+  const chunks = chunkByParagraphs(content, TELEGRAM_SAFE_LIMIT);
+  for (const chunk of chunks) {
     try {
       await ctx.reply(chunk, { parse_mode: "HTML" });
     } catch {
