@@ -45,7 +45,7 @@ import {
   handleModelCmd,
 } from "./handlers/commands";
 import { setBotRef } from "./botRef";
-import { loadSessionRegistry } from "./session";
+import { loadSessionRegistry, sessionRegistry } from "./session";
 
 // Create bot instance
 const bot = new Bot(TELEGRAM_TOKEN);
@@ -211,6 +211,71 @@ try {
   console.log("setMyCommands: menu slash enregistre");
 } catch (e) {
   console.warn("setMyCommands failed:", e);
+}
+
+// Notify each active session of the restart (unplanned Coolify redeploy,
+// crash restart, etc). Users need to know the bot reloaded, otherwise they
+// might keep chatting assuming context continuity while Claude has actually
+// resumed from persisted sessionId (which may or may not still hold the
+// full conversation depending on Anthropic-side retention).
+//
+// Throttle: skip if a notification was sent less than RESTART_NOTIFY_MIN_INTERVAL_MS
+// ago to avoid spamming during crash loops.
+const RESTART_NOTIFY_MIN_INTERVAL_MS = 60_000;
+const restartMarker = "/tmp/ecosys-last-restart-notify.ts";
+const shouldNotifyRestart = await (async () => {
+  try {
+    if (existsSync(restartMarker)) {
+      const lastTs = parseInt(readFileSync(restartMarker, "utf-8").trim(), 10);
+      if (
+        !isNaN(lastTs) &&
+        Date.now() - lastTs < RESTART_NOTIFY_MIN_INTERVAL_MS
+      ) {
+        console.log("[restart] last notify was recent, skipping");
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return true;
+  }
+})();
+
+if (shouldNotifyRestart && sessionRegistry.size > 0) {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("fr-FR", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  let notified = 0;
+  for (const [sessionKey, s] of sessionRegistry.entries()) {
+    if (!s.sessionId) continue;
+    const [chatStr, threadStr] = sessionKey.split(":");
+    const chatId = parseInt(chatStr ?? "", 10);
+    const threadId = parseInt(threadStr ?? "0", 10);
+    if (!chatId || isNaN(chatId)) continue;
+    try {
+      await bot.api.sendMessage(
+        chatId,
+        `<i>Bot redeploye a ${timeStr}. Je tente de reprendre la session precedente (<code>${s.sessionId.slice(0, 8)}...</code>). Si je ne me souviens pas de notre conversation, tape /new pour repartir de zero.</i>`,
+        {
+          parse_mode: "HTML",
+          ...(threadId > 0 ? { message_thread_id: threadId } : {}),
+        },
+      );
+      notified++;
+    } catch (e) {
+      console.warn(`[restart] failed to notify session ${sessionKey}:`, e);
+    }
+  }
+  if (notified > 0) {
+    try {
+      await Bun.write(restartMarker, String(Date.now()));
+    } catch {
+      // ignore
+    }
+    console.log(`[restart] notified ${notified} session(s)`);
+  }
 }
 
 // Check for pending restart message to update
