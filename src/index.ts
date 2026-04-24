@@ -34,6 +34,14 @@ import {
   handleDeny,
   handleHelp,
   handleSessions,
+  handlePermissions,
+  handleIntercept,
+  handleTrust,
+  handleRevoke,
+  handleForbid,
+  handleVoiceCmd,
+  handleVoicesCmd,
+  handleModelCmd,
 } from "./handlers/commands";
 import { setBotRef } from "./botRef";
 import { loadSessionRegistry } from "./session";
@@ -79,6 +87,14 @@ bot.command("help", handleHelp);
 bot.command("approve", handleApprove);
 bot.command("deny", handleDeny);
 bot.command("sessions", handleSessions);
+bot.command("permissions", handlePermissions);
+bot.command("intercept", handleIntercept);
+bot.command("trust", handleTrust);
+bot.command("revoke", handleRevoke);
+bot.command("forbid", handleForbid);
+bot.command("voice", handleVoiceCmd);
+bot.command("voices", handleVoicesCmd);
+bot.command("model", handleModelCmd);
 
 // ============== Message Handlers ==============
 
@@ -148,6 +164,35 @@ try {
     {
       command: "sessions",
       description: "Liste des sessions actives (par topic)",
+    },
+    {
+      command: "permissions",
+      description: "Voir les permissions du topic courant",
+    },
+    {
+      command: "intercept",
+      description: "Forcer l'approval sur un tool (ex: /intercept WebFetch)",
+    },
+    {
+      command: "trust",
+      description: "Auto-approuver un pattern (ex: /trust rm-rf-generic)",
+    },
+    {
+      command: "revoke",
+      description: "Retirer des permissions (ex: /revoke WebFetch)",
+    },
+    {
+      command: "forbid",
+      description: "Interdire un tool sans demander (ex: /forbid sudo)",
+    },
+    {
+      command: "voice",
+      description: "Toggle voix ou changer (ex: /voice fr-FR-HenriNeural)",
+    },
+    { command: "voices", description: "Liste des voix FR disponibles" },
+    {
+      command: "model",
+      description: "Switch de modele (haiku / sonnet / opus)",
     },
     { command: "help", description: "Aide et commandes disponibles" },
   ]);

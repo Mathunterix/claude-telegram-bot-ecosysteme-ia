@@ -34,8 +34,9 @@ import {
   checkPendingAskUserRequests,
   checkPendingSendFileRequests,
 } from "./handlers/streaming";
-import { createCanUseTool } from "./permissions";
+import { createCanUseTool, type SessionPerms } from "./permissions";
 import { requestApproval } from "./handlers/approval";
+import { speakResponse } from "./tts";
 import { checkCommandSafety, isPathAllowed } from "./security";
 import type {
   SavedSession,
@@ -104,6 +105,14 @@ class ClaudeSession {
 
   // S9 model override per topic (if null, fallback to env CLAUDE_MODEL at query time)
   modelOverride: string | null = null;
+
+  // S6.1 permissions editables par topic (extension de S6)
+  // interceptTools : tools safe que l'utilisateur veut forcer en approval (ex: WebFetch, WebSearch)
+  // forbidTools : tools toujours refuses sans demander (ex: WebFetch si interdit par le user)
+  // alwaysApprovedPatterns : pattern keys (rm-rf-generic, ...) OU toolNames auto-approuves pour CE topic
+  interceptTools: Set<string> = new Set();
+  forbidTools: Set<string> = new Set();
+  alwaysApprovedPatterns: Set<string> = new Set();
 
   private abortController: AbortController | null = null;
   private isQueryRunning = false;
@@ -241,7 +250,15 @@ class ClaudeSession {
       permissionMode: "default",
       systemPrompt: SAFETY_PROMPT,
       mcpServers: MCP_SERVERS,
-      canUseTool: createCanUseTool(sessionKey, requestApproval),
+      canUseTool: createCanUseTool(sessionKey, requestApproval, (key) => {
+        const s = sessionRegistry.get(key);
+        if (!s) return null;
+        return {
+          interceptTools: s.interceptTools,
+          forbidTools: s.forbidTools,
+          alwaysApprovedPatterns: s.alwaysApprovedPatterns,
+        } satisfies SessionPerms;
+      }),
       maxThinkingTokens: thinkingTokens,
       additionalDirectories: ALLOWED_PATHS,
       resume: this.sessionId || undefined,
@@ -514,7 +531,22 @@ class ClaudeSession {
 
     await statusCallback("done", "");
 
-    return responseParts.join("") || "No response from Claude.";
+    const finalResponse = responseParts.join("") || "No response from Claude.";
+
+    // S8.3 - TTS pipeline: if voice is enabled for this topic, speak the final
+    // response asynchronously (fire-and-forget so we don't block the return).
+    if (this.voiceMode === "all" && chatId) {
+      const [, threadPart] = this.sessionKey.split(":");
+      const threadId = threadPart ? parseInt(threadPart, 10) : 0;
+      speakResponse({
+        chatId,
+        threadId: threadId > 0 ? threadId : undefined,
+        text: finalResponse,
+        voice: this.voiceName,
+      }).catch((err) => console.warn("[session] speakResponse failed:", err));
+    }
+
+    return finalResponse;
   }
 
   /**
@@ -698,6 +730,9 @@ type PersistedSessionEntry = {
   voiceMode?: "off" | "all";
   voiceName?: string;
   modelOverride?: string | null;
+  interceptTools?: string[];
+  forbidTools?: string[];
+  alwaysApprovedPatterns?: string[];
 };
 
 /**
@@ -722,6 +757,11 @@ export function loadSessionRegistry(): void {
       if (entry.voiceName) s.voiceName = entry.voiceName;
       if (entry.modelOverride !== undefined)
         s.modelOverride = entry.modelOverride;
+      if (entry.interceptTools)
+        s.interceptTools = new Set(entry.interceptTools);
+      if (entry.forbidTools) s.forbidTools = new Set(entry.forbidTools);
+      if (entry.alwaysApprovedPatterns)
+        s.alwaysApprovedPatterns = new Set(entry.alwaysApprovedPatterns);
       sessionRegistry.set(entry.sessionKey, s);
     }
     console.log(
@@ -739,12 +779,15 @@ export function saveSessionRegistry(): void {
   try {
     const entries: PersistedSessionEntry[] = [];
     for (const [sessionKey, s] of sessionRegistry.entries()) {
-      // Persist sessions with either an active sessionId OR user-set preferences
-      // (voice/model) so config survives across restart even before first message.
+      // Persist sessions with either an active sessionId OR any user-set preferences
+      // (voice / model / custom permissions).
       const hasPrefs =
         s.voiceMode !== "off" ||
         s.voiceName !== "fr-FR-DeniseNeural" ||
-        s.modelOverride !== null;
+        s.modelOverride !== null ||
+        s.interceptTools.size > 0 ||
+        s.forbidTools.size > 0 ||
+        s.alwaysApprovedPatterns.size > 0;
       if (!s.sessionId && !hasPrefs) continue;
       entries.push({
         sessionKey,
@@ -755,6 +798,9 @@ export function saveSessionRegistry(): void {
         voiceMode: s.voiceMode,
         voiceName: s.voiceName,
         modelOverride: s.modelOverride,
+        interceptTools: Array.from(s.interceptTools),
+        forbidTools: Array.from(s.forbidTools),
+        alwaysApprovedPatterns: Array.from(s.alwaysApprovedPatterns),
       });
     }
     const dir = SESSIONS_REGISTRY_PATH.substring(

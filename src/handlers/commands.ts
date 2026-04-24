@@ -327,20 +327,36 @@ export async function handleHelp(ctx: Context): Promise<void> {
   }
 
   await ctx.reply(
-    `<b>Commandes disponibles</b>\n\n` +
-      `/new - Nouvelle session (reset memoire + history)\n` +
+    `<b>Sessions</b>\n` +
+      `/new - Nouvelle session (reset memoire + history) pour ce topic\n` +
       `/stop - Stopper la requete en cours\n` +
-      `/status - Etat de la session\n` +
+      `/status - Etat de la session courante\n` +
+      `/sessions - Liste toutes les sessions actives (par topic)\n` +
       `/resume - Reprendre la derniere session\n` +
       `/retry - Relancer le dernier message\n` +
-      `/restart - Redemarrer le bot\n` +
-      `/approve - Approuver la derniere demande de permission\n` +
-      `/deny - Refuser la derniere demande de permission\n\n` +
+      `/restart - Redemarrer le bot\n\n` +
+      `<b>Permissions (par topic)</b>\n` +
+      `/permissions - Etat des permissions du topic\n` +
+      `/intercept Tool - Forcer approval sur un tool safe (ex: /intercept WebFetch)\n` +
+      `/trust pattern - Auto-approuver (ex: /trust rm-rf-generic)\n` +
+      `/revoke pattern - Retirer des listes (ex: /revoke WebFetch)\n` +
+      `/forbid Tool - Interdire sans demander (ex: /forbid sudo)\n` +
+      `/approve - Approuver la derniere demande pending (fallback texte)\n` +
+      `/deny - Refuser la derniere demande pending\n\n` +
+      `<b>Voix (par topic)</b>\n` +
+      `/voice - Toggle on/off\n` +
+      `/voice fr-FR-HenriNeural - Changer la voix\n` +
+      `/voices - Liste des voix FR disponibles\n\n` +
+      `<b>Modele (par topic)</b>\n` +
+      `/model - Afficher le modele courant\n` +
+      `/model haiku|sonnet|opus - Switch modele\n` +
+      `/model default - Revenir au defaut\n\n` +
       `<b>Astuces</b>\n` +
       `- Prefixer avec <code>!</code> interrompt la requete en cours\n` +
       `- Mots-cles <code>think</code>, <code>reflechis</code> activent le raisonnement etendu\n` +
       `- Envoyer photos, vocaux ou documents fonctionne directement\n` +
-      `- Les commandes dangereuses declenchent un popup d'approbation`,
+      `- Chaque topic Telegram = session isolee avec sa propre memoire, voix, modele et permissions\n` +
+      `- Les commandes dangereuses (rm -rf, sudo...) declenchent un popup d'approbation`,
     { parse_mode: "HTML" },
   );
 }
@@ -484,6 +500,345 @@ function formatAgo(date: Date): string {
   if (sec < 3600) return `${Math.floor(sec / 60)}m`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
   return `${Math.floor(sec / 86400)}j`;
+}
+
+// ====================================================================
+// S6.1 — Permissions editables par topic
+// ====================================================================
+
+/**
+ * /permissions - affiche l'etat des permissions pour le topic courant.
+ */
+export async function handlePermissions(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+
+  const lines: string[] = [`<b>Permissions topic ${session.sessionKey}</b>\n`];
+
+  lines.push(
+    "<b>Toujours approuves</b> (pas de demande) :",
+    session.alwaysApprovedPatterns.size > 0
+      ? Array.from(session.alwaysApprovedPatterns)
+          .map((k) => `  - <code>${k}</code>`)
+          .join("\n")
+      : "  <i>(aucun)</i>",
+  );
+
+  lines.push(
+    "",
+    "<b>Interceptes</b> (demandent approval meme si safe) :",
+    session.interceptTools.size > 0
+      ? Array.from(session.interceptTools)
+          .map((t) => `  - <code>${t}</code>`)
+          .join("\n")
+      : "  <i>(aucun)</i>",
+  );
+
+  lines.push(
+    "",
+    "<b>Interdits</b> (refuses sans demander) :",
+    session.forbidTools.size > 0
+      ? Array.from(session.forbidTools)
+          .map((t) => `  - <code>${t}</code>`)
+          .join("\n")
+      : "  <i>(aucun)</i>",
+  );
+
+  lines.push(
+    "",
+    "<i>Commandes : /intercept tool, /trust pattern, /revoke pattern, /forbid tool</i>",
+  );
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+}
+
+function parseArg(ctx: Context): string | null {
+  const text = ctx.message?.text ?? "";
+  const parts = text.trim().split(/\s+/);
+  return parts.length >= 2 ? parts.slice(1).join(" ") : null;
+}
+
+/**
+ * /intercept <tool> - force approval meme sur un tool safe.
+ */
+export async function handleIntercept(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const tool = parseArg(ctx);
+  if (!tool) {
+    await ctx.reply("Usage : /intercept <Tool> (ex: /intercept WebFetch)");
+    return;
+  }
+  session.interceptTools.add(tool);
+  session.alwaysApprovedPatterns.delete(tool);
+  saveSessionRegistry();
+  await ctx.reply(
+    `OK. <code>${tool}</code> sera intercepte a chaque utilisation pour ce topic.`,
+    { parse_mode: "HTML" },
+  );
+}
+
+/**
+ * /trust <patternKey|tool> - auto-approuve toujours pour ce topic.
+ */
+export async function handleTrust(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const key = parseArg(ctx);
+  if (!key) {
+    await ctx.reply(
+      "Usage : /trust <pattern> (ex: /trust rm-rf-generic ou /trust WebFetch)",
+    );
+    return;
+  }
+  session.alwaysApprovedPatterns.add(key);
+  session.forbidTools.delete(key);
+  saveSessionRegistry();
+  await ctx.reply(
+    `OK. <code>${key}</code> est maintenant auto-approuve pour ce topic.`,
+    { parse_mode: "HTML" },
+  );
+}
+
+/**
+ * /revoke <patternKey|tool> - retire de trust + intercept -> redemandera.
+ */
+export async function handleRevoke(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const key = parseArg(ctx);
+  if (!key) {
+    await ctx.reply("Usage : /revoke <pattern> (ex: /revoke WebFetch)");
+    return;
+  }
+  const removedTrust = session.alwaysApprovedPatterns.delete(key);
+  const removedIntercept = session.interceptTools.delete(key);
+  const removedForbid = session.forbidTools.delete(key);
+  saveSessionRegistry();
+  if (!removedTrust && !removedIntercept && !removedForbid) {
+    await ctx.reply(`<code>${key}</code> n'etait dans aucune liste.`, {
+      parse_mode: "HTML",
+    });
+    return;
+  }
+  await ctx.reply(
+    `OK. <code>${key}</code> retire des listes (trust/intercept/forbid) pour ce topic.`,
+    { parse_mode: "HTML" },
+  );
+}
+
+/**
+ * /forbid <tool> - refus permanent sans demander.
+ */
+export async function handleForbid(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const tool = parseArg(ctx);
+  if (!tool) {
+    await ctx.reply("Usage : /forbid <Tool> (ex: /forbid WebFetch)");
+    return;
+  }
+  session.forbidTools.add(tool);
+  session.alwaysApprovedPatterns.delete(tool);
+  session.interceptTools.delete(tool);
+  saveSessionRegistry();
+  await ctx.reply(
+    `OK. <code>${tool}</code> est interdit pour ce topic (refus immediat sans demander).`,
+    { parse_mode: "HTML" },
+  );
+}
+
+// ====================================================================
+// S8 — TTS commandes : /voice et /voices
+// ====================================================================
+
+const KNOWN_VOICES: Array<{ id: string; label: string }> = [
+  { id: "fr-FR-DeniseNeural", label: "Denise (FR feminin, defaut)" },
+  { id: "fr-FR-HenriNeural", label: "Henri (FR masculin)" },
+  { id: "fr-FR-EloiseNeural", label: "Eloise (FR feminin, adolescent)" },
+  { id: "fr-FR-RemyMultilingualNeural", label: "Remy (FR multilingue)" },
+  {
+    id: "fr-FR-VivienneMultilingualNeural",
+    label: "Vivienne (FR multilingue)",
+  },
+  { id: "fr-CA-SylvieNeural", label: "Sylvie (quebecois feminin)" },
+  { id: "fr-CA-AntoineNeural", label: "Antoine (quebecois masculin)" },
+  { id: "fr-CH-ArianeNeural", label: "Ariane (suisse feminin)" },
+];
+
+/**
+ * /voice - toggle on/off, ou set a specific voice, ou status.
+ * Usages:
+ *   /voice         -> toggle on/off
+ *   /voice on      -> active (garde la voix courante)
+ *   /voice off     -> desactive
+ *   /voice <name>  -> set la voix et active (ex: /voice fr-FR-HenriNeural)
+ */
+export async function handleVoiceCmd(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const arg = parseArg(ctx)?.trim();
+
+  if (!arg) {
+    session.voiceMode = session.voiceMode === "off" ? "all" : "off";
+    saveSessionRegistry();
+    await ctx.reply(
+      `Voix : <b>${session.voiceMode}</b> (voix actuelle : <code>${session.voiceName}</code>)`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  if (arg === "on") {
+    session.voiceMode = "all";
+    saveSessionRegistry();
+    await ctx.reply(`Voix activee (<code>${session.voiceName}</code>).`, {
+      parse_mode: "HTML",
+    });
+    return;
+  }
+  if (arg === "off") {
+    session.voiceMode = "off";
+    saveSessionRegistry();
+    await ctx.reply("Voix desactivee.");
+    return;
+  }
+
+  // Check contre la liste connue pour UX, mais on accepte n'importe quelle voix edge-tts
+  const known = KNOWN_VOICES.find((v) => v.id === arg);
+  if (!known && !arg.includes("-")) {
+    await ctx.reply(
+      `Voix <code>${arg}</code> inconnue. Tape /voices pour la liste ou donne un id edge-tts (ex: fr-FR-HenriNeural).`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  session.voiceName = arg;
+  session.voiceMode = "all";
+  saveSessionRegistry();
+  await ctx.reply(`Voix <code>${arg}</code> activee pour ce topic.`, {
+    parse_mode: "HTML",
+  });
+}
+
+/**
+ * /voices - liste les voix FR connues.
+ */
+export async function handleVoicesCmd(ctx: Context): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const lines: string[] = ["<b>Voix francaises disponibles</b>\n"];
+  for (const v of KNOWN_VOICES) {
+    lines.push(`<code>${v.id}</code> - ${v.label}`);
+  }
+  lines.push(
+    "",
+    "<i>Usage : /voice fr-FR-HenriNeural pour changer</i>",
+    "<i>Tu peux aussi utiliser n'importe quelle voix Microsoft Edge (en-US-..., es-ES-..., etc.)</i>",
+  );
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+}
+
+// ====================================================================
+// S9 — /model switch per-topic
+// ====================================================================
+
+const MODEL_ALIASES: Record<string, string> = {
+  haiku: "claude-haiku-4-5",
+  sonnet: "claude-sonnet-4-6",
+  opus: "claude-opus-4-7",
+  "haiku-4-5": "claude-haiku-4-5",
+  "sonnet-4-6": "claude-sonnet-4-6",
+  "opus-4-7": "claude-opus-4-7",
+};
+
+/**
+ * /model - switch model for this topic.
+ * /model         -> affiche le modele courant
+ * /model haiku   -> claude-haiku-4-5
+ * /model sonnet  -> claude-sonnet-4-6
+ * /model opus    -> claude-opus-4-7
+ * /model default -> retire l'override (utilise env CLAUDE_MODEL)
+ */
+export async function handleModelCmd(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+  const arg = parseArg(ctx)?.trim().toLowerCase();
+  const envModel = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
+  const effective = session.modelOverride || envModel;
+
+  if (!arg) {
+    await ctx.reply(
+      `<b>Modele courant (topic)</b>\n` +
+        `  <code>${effective}</code>${session.modelOverride ? " (override)" : " (defaut env)"}\n\n` +
+        `<b>Options</b>\n` +
+        `  /model haiku - rapide, 5x moins cher\n` +
+        `  /model sonnet - equilibre (defaut)\n` +
+        `  /model opus - maximum intelligence, plus cher\n` +
+        `  /model default - utiliser le defaut du container`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  if (arg === "default" || arg === "reset") {
+    session.modelOverride = null;
+    saveSessionRegistry();
+    await ctx.reply(
+      `Override retire. Ce topic utilisera <code>${envModel}</code> (defaut env).`,
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+
+  const resolved = MODEL_ALIASES[arg] || arg;
+  if (!resolved.startsWith("claude-")) {
+    await ctx.reply(
+      "Modele inconnu. Utilise haiku / sonnet / opus, ou un id <code>claude-...</code>.",
+      { parse_mode: "HTML" },
+    );
+    return;
+  }
+  session.modelOverride = resolved;
+  saveSessionRegistry();
+  // La prochaine query utilisera le nouveau modele. Le sessionId actuel reste valable
+  // (c'est Claude Code SDK qui gere le switch en interne via resume).
+  await ctx.reply(
+    `Modele du topic : <code>${resolved}</code>. Applique au prochain message.`,
+    { parse_mode: "HTML" },
+  );
 }
 
 // Suppress unused-import warning for existsSync in some TS setups (helper for future use).

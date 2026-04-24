@@ -258,59 +258,91 @@ export type RequestApprovalFn = (
 ) => Promise<ApprovalChoice>;
 
 /**
+ * Per-session permission hooks. Injected by session.ts so permissions.ts
+ * doesn't import ClaudeSession directly.
+ */
+export type SessionPerms = {
+  interceptTools: Set<string>;
+  forbidTools: Set<string>;
+  alwaysApprovedPatterns: Set<string>;
+};
+export type SessionPermsGetter = (sessionKey: string) => SessionPerms | null;
+
+/**
  * Factory de canUseTool. Appelee par session.ts avec le sessionKey courant
- * + le requestApproval delegate (qui ecrit le fichier et envoie le bouton).
+ * + le requestApproval delegate (qui ecrit le fichier et envoie le bouton)
+ * + un getter sur les permissions editables de la session (S6.1).
  */
 export function createCanUseTool(
   sessionKey: string,
   requestApproval: RequestApprovalFn,
+  getSessionPerms: SessionPermsGetter,
 ) {
   return async function canUseTool(
     toolName: string,
     input: Record<string, unknown>,
     _options: { signal: AbortSignal; toolUseID: string },
   ) {
-    const danger = classifyToolUse(toolName, input);
-    if (!danger) {
+    const perms = getSessionPerms(sessionKey);
+
+    // 1. /forbid <tool> : refus immediat sans demander
+    if (perms && perms.forbidTools.has(toolName)) {
+      return {
+        behavior: "deny" as const,
+        message: `L'outil ${toolName} est interdit pour ce topic (par /forbid). Ne le reessaie pas.`,
+      };
+    }
+
+    // 2. Classification danger. Combine patterns natifs (bash regex) + intercept custom per-topic.
+    const nativeDanger = classifyToolUse(toolName, input);
+    const customIntercept = perms?.interceptTools.has(toolName) ?? false;
+
+    if (!nativeDanger && !customIntercept) {
       return { behavior: "allow" as const, updatedInput: input };
     }
 
-    // Deja approuve pour cette session ou pour toujours ?
+    const patternKey = nativeDanger?.patternKey ?? toolName;
+    const description =
+      nativeDanger?.description ?? `Tool intercepte (${toolName})`;
+
+    // 3. Deja approuve (per-topic OU session OU global legacy)
     if (
-      isSessionApproved(sessionKey, danger.patternKey) ||
-      isAlwaysApproved(danger.patternKey)
+      (perms && perms.alwaysApprovedPatterns.has(patternKey)) ||
+      isSessionApproved(sessionKey, patternKey) ||
+      isAlwaysApproved(patternKey)
     ) {
       return { behavior: "allow" as const, updatedInput: input };
     }
 
-    // Demande a l'utilisateur
+    // 4. Demande a l'utilisateur
     const command =
       typeof input.command === "string" ? input.command : JSON.stringify(input);
     const choice = await requestApproval(
       sessionKey,
       toolName,
       command,
-      danger.description,
+      description,
     );
 
     switch (choice) {
       case "once":
         return { behavior: "allow" as const, updatedInput: input };
       case "session":
-        addSessionApproved(sessionKey, danger.patternKey);
+        addSessionApproved(sessionKey, patternKey);
         return { behavior: "allow" as const, updatedInput: input };
       case "always":
-        addAlwaysApproved(danger.patternKey);
+        if (perms) perms.alwaysApprovedPatterns.add(patternKey);
+        addAlwaysApproved(patternKey);
         return { behavior: "allow" as const, updatedInput: input };
       case "deny":
         return {
           behavior: "deny" as const,
-          message: `L'utilisateur a refuse l'execution de cette commande (${danger.description}). Ne reessaie pas cette commande sans son accord explicite.`,
+          message: `L'utilisateur a refuse (${description}). Ne reessaie pas. Il peut /forbid ${toolName} pour bloquer definitivement, ou /trust pour autoriser toujours.`,
         };
       case "timeout":
         return {
           behavior: "deny" as const,
-          message: `Aucune reponse de l'utilisateur sur l'approbation de la commande (${danger.description}). Commande annulee. Tu peux lui demander de reformuler s'il veut l'executer.`,
+          message: `Pas de reponse de l'utilisateur sur l'approbation (${description}). Commande annulee.`,
         };
     }
   };
