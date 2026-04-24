@@ -242,11 +242,32 @@ export function createStatusCallback(
             state.textMessages.set(segmentId, msg);
             state.lastContent.set(segmentId, formatted);
           } catch (htmlError) {
-            // HTML parse failed, fall back to plain text
-            console.debug("HTML reply failed, using plain text:", htmlError);
-            const msg = await ctx.reply(formatted);
-            state.textMessages.set(segmentId, msg);
-            state.lastContent.set(segmentId, formatted);
+            const htmlErrStr = String(htmlError);
+            if (htmlErrStr.includes("MESSAGE_TOO_LONG")) {
+              // Message too long even with formatWithinLimit safety: chunk it.
+              // We lose the editable reference but prefer that over a crash.
+              console.debug(
+                "HTML reply too long, chunking immediately:",
+                htmlErrStr,
+              );
+              await sendChunkedMessages(ctx, formatted);
+              // Do not add to textMessages so future segment_end chunks fresh.
+            } else {
+              // HTML parse failed, fall back to plain text
+              console.debug("HTML reply failed, using plain text:", htmlError);
+              try {
+                const msg = await ctx.reply(formatted);
+                state.textMessages.set(segmentId, msg);
+                state.lastContent.set(segmentId, formatted);
+              } catch (plainError) {
+                const plainErrStr = String(plainError);
+                if (plainErrStr.includes("MESSAGE_TOO_LONG")) {
+                  await sendChunkedMessages(ctx, formatted);
+                } else {
+                  console.error("Plain text reply also failed:", plainError);
+                }
+              }
+            }
           }
           state.lastEditTimes.set(segmentId, now);
         } else if (now - lastEdit > STREAMING_THROTTLE_MS) {

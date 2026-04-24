@@ -6,6 +6,7 @@
 
 import { Bot } from "grammy";
 import { run, sequentialize } from "@grammyjs/runner";
+import { autoRetry } from "@grammyjs/auto-retry";
 import {
   TELEGRAM_TOKEN,
   WORKING_DIR,
@@ -48,6 +49,17 @@ import { loadSessionRegistry } from "./session";
 
 // Create bot instance
 const bot = new Bot(TELEGRAM_TOKEN);
+
+// Auto-retry on Telegram rate limits (429) and transient network errors.
+// Telegram enforces flood control; without this the bot crashes on long streaming
+// or rapid tool message bursts. The plugin respects retry_after from Telegram
+// and caps attempts / delay so we don't deadlock forever.
+bot.api.config.use(
+  autoRetry({
+    maxRetryAttempts: 3,
+    maxDelaySeconds: 60,
+  }),
+);
 
 // Expose bot reference for modules that need to send messages outside a Context
 // (e.g. approval.ts triggered from canUseTool callback).
