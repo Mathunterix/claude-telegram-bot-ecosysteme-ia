@@ -22,7 +22,7 @@ import {
  */
 export function createAskUserKeyboard(
   requestId: string,
-  options: string[]
+  options: string[],
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (let idx = 0; idx < options.length; idx++) {
@@ -43,7 +43,7 @@ export function createAskUserKeyboard(
  */
 export async function checkPendingAskUserRequests(
   ctx: Context,
-  chatId: number
+  chatId: number,
 ): Promise<boolean> {
   const glob = new Bun.Glob("ask-user-*.json");
   let buttonsSent = false;
@@ -90,7 +90,7 @@ const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".ogg", ".flac", ".m4a"]);
  */
 export async function checkPendingSendFileRequests(
   ctx: Context,
-  chatId: number
+  chatId: number,
 ): Promise<boolean> {
   const glob = new Bun.Glob("send-file-*.json");
   let fileSent = false;
@@ -110,7 +110,11 @@ export async function checkPendingSendFileRequests(
       const caption: string | undefined = data.caption || undefined;
 
       if (!filePath) {
-        try { unlinkSync(filepath); } catch { /* ignore */ }
+        try {
+          unlinkSync(filepath);
+        } catch {
+          /* ignore */
+        }
         continue;
       }
 
@@ -132,12 +136,16 @@ export async function checkPendingSendFileRequests(
       } catch (sendError) {
         console.error(`Failed to send file ${filePath}:`, sendError);
         await ctx.reply(
-          `Failed to send file: ${filePath.split("/").pop() || "unknown"}`
+          `Failed to send file: ${filePath.split("/").pop() || "unknown"}`,
         );
       }
 
       // Always clean up the request file
-      try { unlinkSync(filepath); } catch { /* ignore */ }
+      try {
+        unlinkSync(filepath);
+      } catch {
+        /* ignore */
+      }
     } catch (error) {
       console.warn(`Failed to process send-file request ${filepath}:`, error);
     }
@@ -162,7 +170,7 @@ export class StreamingState {
  */
 function formatWithinLimit(
   content: string,
-  safeLimit: number = TELEGRAM_SAFE_LIMIT
+  safeLimit: number = TELEGRAM_SAFE_LIMIT,
 ): string {
   let display =
     content.length > safeLimit ? content.slice(0, safeLimit) + "..." : content;
@@ -183,7 +191,7 @@ function formatWithinLimit(
  */
 async function sendChunkedMessages(
   ctx: Context,
-  content: string
+  content: string,
 ): Promise<void> {
   // Split on markdown content first, then format each chunk
   for (let i = 0; i < content.length; i += TELEGRAM_SAFE_LIMIT) {
@@ -206,7 +214,7 @@ async function sendChunkedMessages(
  */
 export function createStatusCallback(
   ctx: Context,
-  state: StreamingState
+  state: StreamingState,
 ): StatusCallback {
   return async (statusType: string, content: string, segmentId?: number) => {
     try {
@@ -256,7 +264,7 @@ export function createStatusCallback(
               formatted,
               {
                 parse_mode: "HTML",
-              }
+              },
             );
             state.lastContent.set(segmentId, formatted);
           } catch (error) {
@@ -264,7 +272,7 @@ export function createStatusCallback(
             if (errorStr.includes("MESSAGE_TOO_LONG")) {
               // Skip this intermediate update - segment_end will chunk properly
               console.debug(
-                "Streaming edit too long, deferring to segment_end"
+                "Streaming edit too long, deferring to segment_end",
               );
             } else {
               console.debug("HTML edit failed, trying plain text:", error);
@@ -272,7 +280,7 @@ export function createStatusCallback(
                 await ctx.api.editMessageText(
                   msg.chat.id,
                   msg.message_id,
-                  formatted
+                  formatted,
                 );
                 state.lastContent.set(segmentId, formatted);
               } catch (editError) {
@@ -300,7 +308,7 @@ export function createStatusCallback(
                 formatted,
                 {
                   parse_mode: "HTML",
-                }
+                },
               );
             } catch (error) {
               const errorStr = String(error);
@@ -327,14 +335,11 @@ export function createStatusCallback(
           }
         }
       } else if (statusType === "done") {
-        // Delete tool messages - text messages stay
-        for (const toolMsg of state.toolMessages) {
-          try {
-            await ctx.api.deleteMessage(toolMsg.chat.id, toolMsg.message_id);
-          } catch (error) {
-            console.debug("Failed to delete tool message:", error);
-          }
-        }
+        // ecosysteme-ia: we keep tool messages visible (like Hermes) so the user
+        // sees exactly what Claude did. Upstream linuz90 deletes them at "done",
+        // which hides the full tool trajectory from the Telegram timeline.
+        // Clear the buffer so memory doesn't grow, but don't delete the messages.
+        state.toolMessages.length = 0;
       }
     } catch (error) {
       console.error("Status callback error:", error);

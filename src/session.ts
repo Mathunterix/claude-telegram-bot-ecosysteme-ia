@@ -98,6 +98,13 @@ class ClaudeSession {
   lastMessage: string | null = null;
   conversationTitle: string | null = null;
 
+  // S8 TTS config per topic
+  voiceMode: "off" | "all" = "off";
+  voiceName: string = "fr-FR-DeniseNeural";
+
+  // S9 model override per topic (if null, fallback to env CLAUDE_MODEL at query time)
+  modelOverride: string | null = null;
+
   private abortController: AbortController | null = null;
   private isQueryRunning = false;
   private stopRequested = false;
@@ -225,8 +232,10 @@ class ClaudeSession {
     // canUseTool intercepte les tool uses dangereux et demande approval via Telegram.
     // Le sessionKey est fixe par session (constructor) et inclut chat_id + thread_id.
     const sessionKey = this.sessionKey;
+    const effectiveModel =
+      this.modelOverride || process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
     const options: Options = {
-      model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
+      model: effectiveModel,
       cwd: WORKING_DIR,
       settingSources: ["user", "project"],
       permissionMode: "default",
@@ -686,6 +695,9 @@ type PersistedSessionEntry = {
   lastMessage: string | null;
   conversationTitle: string | null;
   lastActivityISO: string | null;
+  voiceMode?: "off" | "all";
+  voiceName?: string;
+  modelOverride?: string | null;
 };
 
 /**
@@ -706,6 +718,10 @@ export function loadSessionRegistry(): void {
       s.lastActivity = entry.lastActivityISO
         ? new Date(entry.lastActivityISO)
         : null;
+      if (entry.voiceMode) s.voiceMode = entry.voiceMode;
+      if (entry.voiceName) s.voiceName = entry.voiceName;
+      if (entry.modelOverride !== undefined)
+        s.modelOverride = entry.modelOverride;
       sessionRegistry.set(entry.sessionKey, s);
     }
     console.log(
@@ -723,14 +739,22 @@ export function saveSessionRegistry(): void {
   try {
     const entries: PersistedSessionEntry[] = [];
     for (const [sessionKey, s] of sessionRegistry.entries()) {
-      // Only persist active sessions (with sessionId) to avoid bloat
-      if (!s.sessionId) continue;
+      // Persist sessions with either an active sessionId OR user-set preferences
+      // (voice/model) so config survives across restart even before first message.
+      const hasPrefs =
+        s.voiceMode !== "off" ||
+        s.voiceName !== "fr-FR-DeniseNeural" ||
+        s.modelOverride !== null;
+      if (!s.sessionId && !hasPrefs) continue;
       entries.push({
         sessionKey,
         sessionId: s.sessionId,
         lastMessage: s.lastMessage,
         conversationTitle: s.conversationTitle,
         lastActivityISO: s.lastActivity ? s.lastActivity.toISOString() : null,
+        voiceMode: s.voiceMode,
+        voiceName: s.voiceName,
+        modelOverride: s.modelOverride,
       });
     }
     const dir = SESSIONS_REGISTRY_PATH.substring(
