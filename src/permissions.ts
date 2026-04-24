@@ -167,7 +167,7 @@ export function classifyToolUse(
 
 const ALWAYS_APPROVED_PATH =
   process.env.ECOSYS_APPROVED_PATH ||
-  "/app/vault/.cache/approved-commands.json";
+  "/app/vault/.claude/.cache/approved-commands.json";
 
 type AlwaysApprovedStore = {
   patterns: string[];

@@ -6,7 +6,7 @@
 
 import type { Context } from "grammy";
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { session } from "../session";
+import { getSession, saveSessionRegistry, listSessions } from "../session";
 import { WORKING_DIR, ALLOWED_USERS, RESTART_FILE } from "../config";
 import { isAuthorized } from "../security";
 import type { ApprovalChoice } from "../permissions";
@@ -15,6 +15,7 @@ import type { ApprovalChoice } from "../permissions";
  * /start - Show welcome message and status.
  */
 export async function handleStart(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   const username = ctx.from?.username || "unknown";
 
@@ -49,6 +50,7 @@ export async function handleStart(ctx: Context): Promise<void> {
  * /new - Start a fresh session.
  */
 export async function handleNew(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
 
   if (!isAuthorized(userId, ALLOWED_USERS)) {
@@ -75,6 +77,7 @@ export async function handleNew(ctx: Context): Promise<void> {
  * /stop - Stop the current query (silently).
  */
 export async function handleStop(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
 
   if (!isAuthorized(userId, ALLOWED_USERS)) {
@@ -98,6 +101,7 @@ export async function handleStop(ctx: Context): Promise<void> {
  * /status - Show detailed status.
  */
 export async function handleStatus(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
 
   if (!isAuthorized(userId, ALLOWED_USERS)) {
@@ -171,6 +175,7 @@ export async function handleStatus(ctx: Context): Promise<void> {
  * /resume - Show list of sessions to resume with inline keyboard.
  */
 export async function handleResume(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
 
   if (!isAuthorized(userId, ALLOWED_USERS)) {
@@ -231,6 +236,7 @@ export async function handleResume(ctx: Context): Promise<void> {
  * /restart - Restart the bot process.
  */
 export async function handleRestart(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   const chatId = ctx.chat?.id;
 
@@ -268,6 +274,7 @@ export async function handleRestart(ctx: Context): Promise<void> {
  * /retry - Retry the last message (resume session and re-send).
  */
 export async function handleRetry(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
 
   if (!isAuthorized(userId, ALLOWED_USERS)) {
@@ -312,6 +319,7 @@ export async function handleRetry(ctx: Context): Promise<void> {
  * /help — Afficher toutes les commandes disponibles en francais.
  */
 export async function handleHelp(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   if (!isAuthorized(userId, ALLOWED_USERS)) {
     await ctx.reply("Non autorise. Contacte le proprietaire du bot.");
@@ -402,6 +410,7 @@ async function resolveLatestApproval(
  * Accepte un argument optionnel : once (defaut) / session / always.
  */
 export async function handleApprove(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   if (!isAuthorized(userId, ALLOWED_USERS)) {
     await ctx.reply("Non autorise.");
@@ -419,12 +428,62 @@ export async function handleApprove(ctx: Context): Promise<void> {
  * /deny - Refuser la derniere demande pending (fallback texte).
  */
 export async function handleDeny(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   if (!isAuthorized(userId, ALLOWED_USERS)) {
     await ctx.reply("Non autorise.");
     return;
   }
   await resolveLatestApproval(ctx, "deny");
+}
+
+/**
+ * /sessions - liste toutes les sessions actives par topic (S7).
+ * Le topic courant est marque avec un asterisque.
+ */
+export async function handleSessions(ctx: Context): Promise<void> {
+  const current = getSession(ctx);
+  const userId = ctx.from?.id;
+  if (!isAuthorized(userId, ALLOWED_USERS)) {
+    await ctx.reply("Non autorise.");
+    return;
+  }
+
+  const all = listSessions().filter((s) => s.active);
+
+  if (all.length === 0) {
+    await ctx.reply(
+      "Aucune session active. Envoie un message pour en demarrer une.",
+    );
+    return;
+  }
+
+  const currentKey = current.sessionKey;
+  const lines: string[] = [`<b>Sessions actives (${all.length})</b>\n`];
+
+  for (const s of all) {
+    const prefix = s.sessionKey === currentKey ? "▶" : "·";
+    const title = s.title || "(sans titre)";
+    const ago = s.lastActivityISO
+      ? formatAgo(new Date(s.lastActivityISO))
+      : "?";
+    const [chatPart, threadPart] = s.sessionKey.split(":");
+    const label = threadPart === "0" ? "DM/General" : `thread ${threadPart}`;
+    lines.push(
+      `${prefix} <code>${label}</code> · ${title.slice(0, 40)} · ${ago}`,
+    );
+  }
+
+  lines.push("", "<i>▶ topic courant</i>");
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+}
+
+function formatAgo(date: Date): string {
+  const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}j`;
 }
 
 // Suppress unused-import warning for existsSync in some TS setups (helper for future use).

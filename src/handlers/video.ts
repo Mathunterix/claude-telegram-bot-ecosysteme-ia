@@ -5,7 +5,7 @@
  */
 
 import type { Context } from "grammy";
-import { session } from "../session";
+import { getSession, saveSessionRegistry } from "../session";
 import { ALLOWED_USERS, TEMP_DIR } from "../config";
 import { isAuthorized, rateLimiter } from "../security";
 import { auditLog, auditLogRateLimit, startTypingIndicator } from "../utils";
@@ -19,6 +19,7 @@ const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
  * Download a video and return the local path.
  */
 async function downloadVideo(ctx: Context): Promise<string> {
+  const session = getSession(ctx);
   const video = ctx.message?.video || ctx.message?.video_note;
   if (!video) {
     throw new Error("No video in message");
@@ -45,6 +46,7 @@ async function downloadVideo(ctx: Context): Promise<string> {
  * Handle incoming video messages.
  */
 export async function handleVideo(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   const username = ctx.from?.username || "unknown";
   const chatId = ctx.chat?.id;

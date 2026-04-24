@@ -7,7 +7,7 @@
 
 import type { Context } from "grammy";
 import { unlinkSync } from "fs";
-import { session } from "../session";
+import { getSession, saveSessionRegistry } from "../session";
 import { ALLOWED_USERS, TEMP_DIR, TRANSCRIPTION_AVAILABLE } from "../config";
 import { isAuthorized, rateLimiter } from "../security";
 import {
@@ -55,6 +55,7 @@ export async function processAudioFile(
   username: string,
   chatId: number
 ): Promise<void> {
+  const session = getSession(ctx);
   if (!TRANSCRIPTION_AVAILABLE) {
     await ctx.reply(
       "Voice transcription is not configured. Set OPENAI_API_KEY in .env"
@@ -149,6 +150,7 @@ export async function processAudioFile(
  * Handle incoming native Telegram audio messages.
  */
 export async function handleAudio(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   const username = ctx.from?.username || "unknown";
   const chatId = ctx.chat?.id;

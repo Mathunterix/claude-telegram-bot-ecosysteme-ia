@@ -5,7 +5,7 @@
  */
 
 import type { Context } from "grammy";
-import { session } from "../session";
+import { getSession, saveSessionRegistry } from "../session";
 import { ALLOWED_USERS, TEMP_DIR } from "../config";
 import { isAuthorized, rateLimiter } from "../security";
 import { auditLog, auditLogRateLimit, startTypingIndicator } from "../utils";
@@ -23,6 +23,7 @@ const photoBuffer = createMediaGroupBuffer({
  * Download a photo and return the local path.
  */
 async function downloadPhoto(ctx: Context): Promise<string> {
+  const session = getSession(ctx);
   const photos = ctx.message?.photo;
   if (!photos || photos.length === 0) {
     throw new Error("No photo in message");
@@ -56,6 +57,7 @@ async function processPhotos(
   username: string,
   chatId: number
 ): Promise<void> {
+  const session = getSession(ctx);
   // Mark processing started
   const stopProcessing = session.startProcessing();
 
@@ -110,6 +112,7 @@ async function processPhotos(
  * Handle incoming photo messages.
  */
 export async function handlePhoto(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   const username = ctx.from?.username || "unknown";
   const chatId = ctx.chat?.id;

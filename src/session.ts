@@ -10,7 +10,13 @@ import {
   type Options,
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "fs";
+import {
+  readFileSync,
+  existsSync as existsSyncNative,
+  readFileSync as readFileSyncNative,
+  writeFileSync as writeFileSyncNative,
+  mkdirSync as mkdirSyncNative,
+} from "fs";
 import type { Context } from "grammy";
 import {
   ALLOWED_PATHS,
@@ -80,6 +86,7 @@ function getTextFromMessage(msg: SDKMessage): string | null {
 const MAX_SESSIONS = 5;
 
 class ClaudeSession {
+  sessionKey: string;
   sessionId: string | null = null;
   lastActivity: Date | null = null;
   queryStarted: Date | null = null;
@@ -96,6 +103,10 @@ class ClaudeSession {
   private stopRequested = false;
   private _isProcessing = false;
   private _wasInterruptedByNewMessage = false;
+
+  constructor(sessionKey: string = "default:0") {
+    this.sessionKey = sessionKey;
+  }
 
   get isActive(): boolean {
     return this.sessionId !== null;
@@ -212,9 +223,8 @@ class ClaudeSession {
 
     // Build SDK V1 options - supports all features
     // canUseTool intercepte les tool uses dangereux et demande approval via Telegram.
-    // Si acceptEdits est utilise (patch CVE 2025-55182), ce callback est necessaire
-    // pour eviter les refus silencieux de bash commandes.
-    const sessionKey = chatId ? `${chatId}:0` : "default:0";
+    // Le sessionKey est fixe par session (constructor) et inclut chat_id + thread_id.
+    const sessionKey = this.sessionKey;
     const options: Options = {
       model: process.env.CLAUDE_MODEL || "claude-sonnet-4-6",
       cwd: WORKING_DIR,
@@ -475,6 +485,13 @@ class ClaudeSession {
     this.lastError = null;
     this.lastErrorTime = null;
 
+    // Persist session registry after each query so topics state survives restart.
+    try {
+      saveSessionRegistry();
+    } catch (error) {
+      console.warn("[session] saveSessionRegistry failed:", error);
+    }
+
     // If ask_user was triggered, return early - user will respond via button
     if (askUserTriggered) {
       await statusCallback("done", "");
@@ -614,5 +631,146 @@ class ClaudeSession {
   }
 }
 
-// Global session instance
-export const session = new ClaudeSession();
+// Global session instance (fallback default, used when no topic context is available
+// e.g. from legacy call sites or scripts invoked outside a grammY handler).
+// NOT used anymore by message handlers, which go through getSession(ctx).
+export const session = new ClaudeSession("default:0");
+
+// ==========================================================================
+// S7 - Session registry: one ClaudeSession per Telegram topic.
+// ==========================================================================
+//
+// sessionKey = "{chat_id}:{thread_id || 0}"
+// Each topic (Telegram forum thread) gets its own isolated session with its
+// own Claude session_id, lastMessage, conversationTitle, and permissions.
+//
+// Persistence: /app/vault/.cache/sessions.json (gitignored in vault).
+
+const SESSIONS_REGISTRY_PATH =
+  process.env.ECOSYS_SESSIONS_REGISTRY_PATH ||
+  "/app/vault/.claude/.cache/sessions.json";
+
+export const sessionRegistry = new Map<string, ClaudeSession>();
+
+/**
+ * Derive the session key for a given grammY context.
+ * Falls back to "default:0" if no chat_id (shouldn't happen in practice).
+ */
+export function getSessionKey(ctx: Context): string {
+  const chatId = ctx.chat?.id ?? ctx.callbackQuery?.message?.chat.id;
+  if (!chatId) return "default:0";
+  const threadId =
+    ctx.message?.message_thread_id ??
+    ctx.callbackQuery?.message?.message_thread_id ??
+    0;
+  return `${chatId}:${threadId}`;
+}
+
+/**
+ * Get (or lazily create) the ClaudeSession for this context's topic.
+ */
+export function getSession(ctx: Context): ClaudeSession {
+  const key = getSessionKey(ctx);
+  let s = sessionRegistry.get(key);
+  if (!s) {
+    s = new ClaudeSession(key);
+    sessionRegistry.set(key, s);
+    console.log(`[session] created new session for key=${key}`);
+  }
+  return s;
+}
+
+type PersistedSessionEntry = {
+  sessionKey: string;
+  sessionId: string | null;
+  lastMessage: string | null;
+  conversationTitle: string | null;
+  lastActivityISO: string | null;
+};
+
+/**
+ * Load sessions state from disk. Recreates ClaudeSession instances with their
+ * saved sessionId so /resume behavior works across bot restarts.
+ * Non-fatal if the file doesn't exist or is malformed.
+ */
+export function loadSessionRegistry(): void {
+  try {
+    if (!existsSyncNative(SESSIONS_REGISTRY_PATH)) return;
+    const raw = readFileSyncNative(SESSIONS_REGISTRY_PATH, "utf-8");
+    const entries = JSON.parse(raw) as PersistedSessionEntry[];
+    for (const entry of entries) {
+      const s = new ClaudeSession(entry.sessionKey);
+      s.sessionId = entry.sessionId;
+      s.lastMessage = entry.lastMessage;
+      s.conversationTitle = entry.conversationTitle;
+      s.lastActivity = entry.lastActivityISO
+        ? new Date(entry.lastActivityISO)
+        : null;
+      sessionRegistry.set(entry.sessionKey, s);
+    }
+    console.log(
+      `[session] loaded ${sessionRegistry.size} sessions from ${SESSIONS_REGISTRY_PATH}`,
+    );
+  } catch (error) {
+    console.warn("[session] failed to load sessions registry:", error);
+  }
+}
+
+/**
+ * Persist sessions state to disk. Called after each query.
+ */
+export function saveSessionRegistry(): void {
+  try {
+    const entries: PersistedSessionEntry[] = [];
+    for (const [sessionKey, s] of sessionRegistry.entries()) {
+      // Only persist active sessions (with sessionId) to avoid bloat
+      if (!s.sessionId) continue;
+      entries.push({
+        sessionKey,
+        sessionId: s.sessionId,
+        lastMessage: s.lastMessage,
+        conversationTitle: s.conversationTitle,
+        lastActivityISO: s.lastActivity ? s.lastActivity.toISOString() : null,
+      });
+    }
+    const dir = SESSIONS_REGISTRY_PATH.substring(
+      0,
+      SESSIONS_REGISTRY_PATH.lastIndexOf("/"),
+    );
+    if (dir && !existsSyncNative(dir)) {
+      mkdirSyncNative(dir, { recursive: true });
+    }
+    writeFileSyncNative(
+      SESSIONS_REGISTRY_PATH,
+      JSON.stringify(entries, null, 2),
+    );
+  } catch (error) {
+    console.warn("[session] failed to save sessions registry:", error);
+  }
+}
+
+/**
+ * List all active sessions (for /sessions command).
+ */
+export function listSessions(): Array<{
+  sessionKey: string;
+  active: boolean;
+  title: string | null;
+  lastActivityISO: string | null;
+}> {
+  const out: Array<{
+    sessionKey: string;
+    active: boolean;
+    title: string | null;
+    lastActivityISO: string | null;
+  }> = [];
+  for (const [sessionKey, s] of sessionRegistry.entries()) {
+    out.push({
+      sessionKey,
+      active: s.isActive,
+      title: s.conversationTitle,
+      lastActivityISO: s.lastActivity ? s.lastActivity.toISOString() : null,
+    });
+  }
+  return out;
+}

@@ -11,7 +11,7 @@ import type { PendingMediaGroup } from "../types";
 import { MEDIA_GROUP_TIMEOUT } from "../config";
 import { rateLimiter } from "../security";
 import { auditLogRateLimit } from "../utils";
-import { session } from "../session";
+import { getSession, saveSessionRegistry } from "../session";
 
 /**
  * Configuration for a media group handler.
@@ -115,6 +115,7 @@ export function createMediaGroupBuffer(config: MediaGroupConfig) {
     username: string,
     processCallback: ProcessGroupCallback
   ): Promise<boolean> {
+  const session = getSession(ctx);
     if (!pendingGroups.has(mediaGroupId)) {
       // Rate limit on first item only
       const [allowed, retryAfter] = rateLimiter.check(userId);
@@ -180,6 +181,7 @@ export async function handleProcessingError(
   error: unknown,
   toolMessages: Message[]
 ): Promise<void> {
+  const session = getSession(ctx);
   console.error("Error processing media:", error);
 
   // Clean up tool messages

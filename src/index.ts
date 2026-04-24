@@ -29,8 +29,14 @@ import {
   handleVideo,
   handleCallback,
 } from "./handlers";
-import { handleApprove, handleDeny, handleHelp } from "./handlers/commands";
+import {
+  handleApprove,
+  handleDeny,
+  handleHelp,
+  handleSessions,
+} from "./handlers/commands";
 import { setBotRef } from "./botRef";
+import { loadSessionRegistry } from "./session";
 
 // Create bot instance
 const bot = new Bot(TELEGRAM_TOKEN);
@@ -72,6 +78,7 @@ bot.command("retry", handleRetry);
 bot.command("help", handleHelp);
 bot.command("approve", handleApprove);
 bot.command("deny", handleDeny);
+bot.command("sessions", handleSessions);
 
 // ============== Message Handlers ==============
 
@@ -113,6 +120,9 @@ console.log(`Working directory: ${WORKING_DIR}`);
 console.log(`Allowed users: ${ALLOWED_USERS.length}`);
 console.log("Starting bot...");
 
+// Load persisted sessions registry (S7).
+loadSessionRegistry();
+
 // Get bot info first
 const botInfo = await bot.api.getMe();
 console.log(`Bot started: @${botInfo.username}`);
@@ -135,6 +145,10 @@ try {
       description: "Approuver la derniere demande (une fois)",
     },
     { command: "deny", description: "Refuser la derniere demande" },
+    {
+      command: "sessions",
+      description: "Liste des sessions actives (par topic)",
+    },
     { command: "help", description: "Aide et commandes disponibles" },
   ]);
   console.log("setMyCommands: menu slash enregistre");

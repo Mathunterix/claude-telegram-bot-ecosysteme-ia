@@ -6,7 +6,7 @@
  */
 
 import type { Context } from "grammy";
-import { session } from "../session";
+import { getSession, saveSessionRegistry } from "../session";
 import { ALLOWED_USERS, TEMP_DIR } from "../config";
 import { isAuthorized, rateLimiter } from "../security";
 import { auditLog, auditLogRateLimit, startTypingIndicator } from "../utils";
@@ -56,6 +56,7 @@ const documentBuffer = createMediaGroupBuffer({
  * Download a document and return the local path.
  */
 async function downloadDocument(ctx: Context): Promise<string> {
+  const session = getSession(ctx);
   const doc = ctx.message?.document;
   if (!doc) {
     throw new Error("No document in message");
@@ -217,6 +218,7 @@ async function processArchive(
   username: string,
   chatId: number
 ): Promise<void> {
+  const session = getSession(ctx);
   const stopProcessing = session.startProcessing();
   const typing = startTypingIndicator(ctx);
 
@@ -317,6 +319,7 @@ async function processDocuments(
   username: string,
   chatId: number
 ): Promise<void> {
+  const session = getSession(ctx);
   // Mark processing started
   const stopProcessing = session.startProcessing();
 
@@ -388,6 +391,7 @@ async function processDocumentPaths(
   username: string,
   chatId: number
 ): Promise<void> {
+  const session = getSession(ctx);
   // Extract text from all documents
   const documents: Array<{ path: string; name: string; content: string }> = [];
 
@@ -413,6 +417,7 @@ async function processDocumentPaths(
  * Handle incoming document messages.
  */
 export async function handleDocument(ctx: Context): Promise<void> {
+  const session = getSession(ctx);
   const userId = ctx.from?.id;
   const username = ctx.from?.username || "unknown";
   const chatId = ctx.chat?.id;
